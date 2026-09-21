@@ -1,0 +1,47 @@
+# Entorno Virtual Python
+venv/
+env/
+.venv/
+
+# Node.js
+node_modules/
+
+# Autenticacion y Sesiones de WhatsApp
+.wwebjs_auth/
+.wwebjs_cache/
+whatsapp_session/
+
+# Variables de Entorno (Credenciales y Tokens)
+.env
+.env.*
+
+# Base de Datos SQLite (Ignorar BD principal, temporales y WAL)
+bot_ia.db
+bot_ia.db-journal
+bot_ia.db-wal
+bot_ia.db-shm
+*.db
+*.sqlite
+*.sqlite3
+
+# Archivos de Excel (Cargas Manuales o Reportes)
+*.xlsx
+*.xls
+*.csv
+
+# Python Cache & Temporales
+__pycache__/
+*.py[cod]
+*.class
+.pytest_cache/
+
+# Logs de depuracion
+*.log
+bot_debug.log
+node_debug.log
+
+# IDEs y SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

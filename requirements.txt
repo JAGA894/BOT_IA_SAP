@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+google-genai
+google-api-core
+python-dotenv
+tenacity
+aiosqlite
+httpx
+requests
+schedule

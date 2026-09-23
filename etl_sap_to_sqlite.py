@@ -31,120 +31,122 @@ def init_db():
             cursor = conn.cursor()
             cursor.execute("PRAGMA journal_mode=WAL;")
         
-        # Crear tabla CxC_Local basada en la vista V_CXC_BOT_IA
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS CxC_Local (
-                Empresa TEXT,
-                Folio_factura INTEGER,
-                Nombre_cliente TEXT,
-                Nombre_extranjero TEXT,
-                Fecha_documento DATE,
-                Proyecto TEXT,
-                Impuestos REAL,
-                Retenciones REAL,
-                Total_factura REAL,
-                Importe_aplicado REAL,
-                Saldo_vencido REAL
-            )
-        ''')
+            # Crear tabla CxC_Local basada en la vista V_CXC_BOT_IA
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS CxC_Local (
+                    Empresa TEXT,
+                    Folio_factura INTEGER,
+                    Nombre_cliente TEXT,
+                    Nombre_extranjero TEXT,
+                    Fecha_documento DATE,
+                    Proyecto TEXT,
+                    Impuestos REAL,
+                    Retenciones REAL,
+                    Total_factura REAL,
+                    Importe_aplicado REAL,
+                    Saldo_vencido REAL
+                )
+            ''')
         
-        # Tabla de control de arranque y estados
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS etl_control (
-                id INTEGER PRIMARY KEY,
-                primer_arranque_completado INTEGER DEFAULT 0,
-                ultimo_etl_exitoso TEXT
-            )
-        ''')
+            # Tabla de control de arranque y estados
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS etl_control (
+                    id INTEGER PRIMARY KEY,
+                    primer_arranque_completado INTEGER DEFAULT 0,
+                    ultimo_etl_exitoso TEXT
+                )
+            ''')
         
-        # Inicializar fila de control si no existe
-        cursor.execute("INSERT OR IGNORE INTO etl_control (id, primer_arranque_completado) VALUES (1, 0)")
+            # Inicializar fila de control si no existe
+            cursor.execute("INSERT OR IGNORE INTO etl_control (id, primer_arranque_completado) VALUES (1, 0)")
         
-        # Tabla para guardar la foto anterior de los folios
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS CxC_Snapshot_folios (
-                empresa TEXT,
-                folio INTEGER,
-                PRIMARY KEY (empresa, folio)
-            )
-        ''')
+            # Tabla para guardar la foto anterior de los folios
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS CxC_Snapshot_folios (
+                    empresa TEXT,
+                    folio INTEGER,
+                    PRIMARY KEY (empresa, folio)
+                )
+            ''')
         
-        # Tabla de destinatarios del broadcast
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS notificacion_destinatarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                tipo TEXT NOT NULL,
-                destino TEXT NOT NULL UNIQUE,
-                activo INTEGER DEFAULT 1,
-                descripcion TEXT
-            )
-        ''')
+            # Tabla de destinatarios del broadcast
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS notificacion_destinatarios (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tipo TEXT NOT NULL,
+                    destino TEXT NOT NULL UNIQUE,
+                    activo INTEGER DEFAULT 1,
+                    descripcion TEXT
+                )
+            ''')
         
-        # Tabla de cola para notificaciones fallidas o fuera de horario
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS notificaciones_pendientes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                mensaje TEXT NOT NULL,
-                timestamp_intento TEXT,
-                enviar_desde TEXT,
-                enviado INTEGER DEFAULT 0
-            )
-        ''')
+            # Tabla de cola para notificaciones fallidas o fuera de horario
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS notificaciones_pendientes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mensaje TEXT NOT NULL,
+                    timestamp_intento TEXT,
+                    enviar_desde TEXT,
+                    enviado INTEGER DEFAULT 0
+                )
+            ''')
         
-        # Verificar si las columnas necesarias existen en caso de que la tabla ya estuviera creada
-        cursor.execute("PRAGMA table_info(CxC_Local)")
-        columns = [column[1] for column in cursor.fetchall()]
+            # Verificar si las columnas necesarias existen en caso de que la tabla ya estuviera creada
+            cursor.execute("PRAGMA table_info(CxC_Local)")
+            columns = [column[1] for column in cursor.fetchall()]
         
-        needed_columns = {
-            'Empresa': 'TEXT',
-            'Folio_factura': 'INTEGER',
-            'Nombre_cliente': 'TEXT',
-            'Nombre_extranjero': 'TEXT',
-            'Fecha_documento': 'DATE',
-            'Proyecto': 'TEXT',
-            'Impuestos': 'REAL',
-            'Retenciones': 'REAL',
-            'Total_factura': 'REAL',
-            'Importe_aplicado': 'REAL',
-            'Saldo_vencido': 'REAL',
-            'ultima_actualizacion': 'TEXT'
-        }
+            needed_columns = {
+                'Empresa': 'TEXT',
+                'Folio_factura': 'INTEGER',
+                'Nombre_cliente': 'TEXT',
+                'Nombre_extranjero': 'TEXT',
+                'Fecha_documento': 'DATE',
+                'Proyecto': 'TEXT',
+                'Impuestos': 'REAL',
+                'Retenciones': 'REAL',
+                'Total_factura': 'REAL',
+                'Importe_aplicado': 'REAL',
+                'Saldo_vencido': 'REAL',
+                'ultima_actualizacion': 'TEXT'
+            }
         
-        for col, col_type in needed_columns.items():
-            if col not in columns:
-                if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', col) or not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', col_type):
-                    raise ValueError(f"Nombre de columna o tipo inválido detectado: {col} {col_type}")
-                cursor.execute(f"ALTER TABLE CxC_Local ADD COLUMN {col} {col_type}")
-                logger.info(f"Columna '{col}' añadida a la tabla existente.")
+            for col, col_type in needed_columns.items():
+                if col not in columns:
+                    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', col) or not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', col_type):
+                        raise ValueError(f"Nombre de columna o tipo inválido detectado: {col} {col_type}")
+                    cursor.execute(f"ALTER TABLE CxC_Local ADD COLUMN {col} {col_type}")
+                    logger.info(f"Columna '{col}' añadida a la tabla existente.")
 
-        # TAREA 2: Limpiar duplicados antes de crear UNIQUE INDEX
-        cursor.execute('''
-            DELETE FROM CxC_Local 
-            WHERE rowid NOT IN (
-                SELECT MIN(rowid) 
-                FROM CxC_Local 
-                GROUP BY Empresa, Folio_factura
-            )
-        ''')
+            # TAREA 2: Limpiar duplicados antes de crear UNIQUE INDEX
+            cursor.execute('''
+                DELETE FROM CxC_Local 
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) 
+                    FROM CxC_Local 
+                    GROUP BY Empresa, Folio_factura
+                )
+            ''')
 
-        # TAREA 2: UNIQUE INDEX para UPSERT
-        cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_cxc_empresa_folio ON CxC_Local(Empresa, Folio_factura)''')
+            # TAREA 2: UNIQUE INDEX para UPSERT
+            cursor.execute('''CREATE UNIQUE INDEX IF NOT EXISTS idx_cxc_empresa_folio ON CxC_Local(Empresa, Folio_factura)''')
 
-        # TAREA 2: Tabla etl_historial
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS etl_historial (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                empresa TEXT,
-                registros_sap INTEGER,
-                registros_nuevos INTEGER,
-                registros_actualizados INTEGER,
-                duracion_segundos REAL,
-                exito INTEGER DEFAULT 1,
-                error_msg TEXT
-            )
-        ''')
-        logger.info("Base de datos y tabla inicializadas correctamente.")
+            # TAREA 2: Tabla etl_historial
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS etl_historial (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT,
+                    empresa TEXT,
+                    registros_sap INTEGER,
+                    registros_nuevos INTEGER,
+                    registros_actualizados INTEGER,
+                    duracion_segundos REAL,
+                    exito INTEGER DEFAULT 1,
+                    error_msg TEXT
+                )
+            ''')
+            logger.info("Base de datos y tabla inicializadas correctamente.")
+
+        conn.commit()
     except Exception as e:
         logger.error(f"Error al inicializar la base de datos: {e}")
 

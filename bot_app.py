@@ -1084,4 +1084,4 @@ async def db_status():
 if __name__ == "__main__":
     import uvicorn
     logger.info("Bot CxC v5.0 | Modelo: %s", GEMINI_MODEL)
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info", workers=1)
+    uvicorn.run(app, host="0.0.0.0", port=8199, log_level="info", workers=1)

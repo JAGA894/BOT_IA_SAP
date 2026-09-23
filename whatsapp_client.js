@@ -20,8 +20,8 @@ const crypto = require('crypto');
 // CONFIGURACION
 // ==========================================
 // require('dotenv').config(); // Eliminado porque causaba Error: Cannot find module 'dotenv'
-const WEBHOOK_URL = 'http://localhost:8000/webhook';
-const PYTHON_LOCAL_URL = 'http://localhost:8000';
+const WEBHOOK_URL = 'http://localhost:8199/webhook';
+const PYTHON_LOCAL_URL = 'http://localhost:8199';
 const CALLBACK_PORT = 3001;
 const WHITELIST = ['85440572964888']; // Hardcodeado temporalmente por falta de dotenv
 

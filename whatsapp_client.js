@@ -189,8 +189,9 @@ async function persistirEmpresa(senderNumber, empresaTecnica) {
 
 // Auto-registrar como destinatario de broadcast si está en whitelist
 async function autoRegistrarDestinatario(senderNumber, originalFrom) {
-    // Validar whitelist antes de registrar para evitar fugas a numeros extraños
-    if (!WHITELIST.includes(senderNumber)) return;
+    // Validar whitelist (permite prefijos de pais) antes de registrar
+    const estaPermitido = WHITELIST.some(num => senderNumber.includes(num));
+    if (!estaPermitido) return;
     
     const chatId = originalFrom;
     try {

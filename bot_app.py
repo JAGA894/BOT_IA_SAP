@@ -1050,7 +1050,7 @@ async def registrar_destinatario(request: Request):
     body = await request.json()
     destino = body.get("destino", "").strip()
     descripcion = body.get("descripcion", "Auto-registrado")
-    if not destino or "@c.us" not in destino:
+    if not destino or ("@c.us" not in destino and "@lid" not in destino):
         return {"status": "ignored", "reason": "formato invalido"}
     async with aiosqlite.connect(DB_NAME, timeout=15.0) as db:
         await db.execute(

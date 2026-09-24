@@ -630,8 +630,8 @@ from google.genai.errors import APIError
 
 @retry(
     retry=retry_if_exception_type((ResourceExhausted, ServiceUnavailable, APIError, httpx.TimeoutException)),
-    wait=wait_random_exponential(min=5, max=60),
-    stop=stop_after_attempt(4),
+    wait=wait_random_exponential(min=10, max=60),
+    stop=stop_after_attempt(10),
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )

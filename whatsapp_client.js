@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const WEBHOOK_URL = 'http://localhost:8199/webhook';
 const PYTHON_LOCAL_URL = 'http://localhost:8199';
 const CALLBACK_PORT = 3001;
-const WHITELIST = ['85440572964888']; // Hardcodeado temporalmente por falta de dotenv
+const WHITELIST = ['85440572964888', '158767878549602', '85950952694007']; // Hardcodeado temporalmente por falta de dotenv
 
 // Mapa de nombres amigables -> nombres tecnicos exactos en la DB
 const EMPRESAS_VALIDAS = {

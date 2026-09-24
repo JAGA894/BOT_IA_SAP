@@ -188,11 +188,11 @@ async function persistirEmpresa(senderNumber, empresaTecnica) {
 }
 
 // Auto-registrar como destinatario de broadcast si está en whitelist
-async function autoRegistrarDestinatario(senderNumber) {
+async function autoRegistrarDestinatario(senderNumber, originalFrom) {
     // Validar whitelist antes de registrar para evitar fugas a numeros extraños
     if (!WHITELIST.includes(senderNumber)) return;
     
-    const chatId = senderNumber.includes('@') ? senderNumber : senderNumber + '@c.us';
+    const chatId = originalFrom;
     try {
         await axios.post(PYTHON_LOCAL_URL + '/registrar_destinatario', {
             destino: chatId,
@@ -208,7 +208,7 @@ async function autoRegistrarDestinatario(senderNumber) {
 // ==========================================
 async function routeMessage(senderNumber, messageText, msg) {
     // TAREA 1: Auto-registrar destinatario (la funcion misma valida la whitelist)
-    autoRegistrarDestinatario(senderNumber);
+    autoRegistrarDestinatario(senderNumber, msg.from);
 
     const textLower = messageText.trim().toLowerCase()
         .normalize('NFD').replace(/[\u0300-\u036f]/g, '');

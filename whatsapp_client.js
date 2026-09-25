@@ -278,7 +278,7 @@ async function routeMessage(senderNumber, messageText, msg) {
         userStates.set(senderNumber, state);
 
         // Confirmacion breve — sin segundo menu
-        await msg.reply('Empresa: *' + nombreDisplay + '* ✅\n\n_Escribe tu consulta financiera o "menu" para ver opciones._');
+        await msg.reply('Empresa: *' + nombreDisplay + '* ✅\n\n_Escribe tu consulta financiera o "cambiar" para elegir otra empresa._');
         console.log('   [ROUTER] Empresa anclada: ' + empresaTecnica + ' | estado -> IA');
         return;
     }

@@ -202,10 +202,10 @@ def fetch_cxc_data(session, company_name):
                 response.raise_for_status()
             except requests.exceptions.Timeout:
                 logger.error(f"Timeout al obtener datos (paginación) para {company_name}. url={url}")
-                break
+                return None
             except requests.exceptions.RequestException as e:
                 logger.error(f"Error HTTP al obtener datos para {company_name}: {e}")
-                break
+                return None
                 
             data = response.json()
             
@@ -320,22 +320,23 @@ def detectar_novedades(data_nueva):
     
     fecha_hoy = datetime.now().strftime("%d/%b/%Y")
     msg = f"🔔 *Nueva(s) Factura(s) Detectada(s)*\n"
-    msg += f"📅 {fecha_hoy} | Ciclo {inicio_hora}→{fin_hora}\n"
+    msg += f"📅 {fecha_hoy}\n"
     msg += f"🏢 Empresa(s): {empresa_nombres}\n"
     msg += f"{'─' * 28}\n"
     for r in nuevos[:10]:
         fol = r.get('Folio_factura') or r.get('Folio_de_la_factura')
-        cli = (r.get('Nombre_cliente') or r.get('Nombre_del_cliente') or r.get('Proyecto') or 'Sin nombre')[:20]
+        cli = (r.get('Nombre_cliente') or r.get('Nombre_del_cliente') or r.get('Proyecto') or 'Sin nombre')
         tot = float(r.get('Total_factura') or r.get('Total_de_la_factura') or 0.0)
         saldo = float(r.get('Saldo_vencido') or 0.0)
         estado = "✅ Pagada" if saldo <= 0 else "🔴 Pendiente"
-        msg += f"• *Folio {fol}* — {cli}\n"
-        msg += f"  💰 ${tot:,.2f} | {estado}\n"
+        msg += f"📄 *Folio:* {fol}\n"
+        msg += f"👤 *Cliente:* {cli}\n"
+        msg += f"💰 *Monto:*  | {estado}\n\n"
     if len(nuevos) > 10:
-        msg += f"\n_...y {len(nuevos) - 10} más. Consulta el bot para el listado completo._\n"
+        msg += f"_...y {len(nuevos) - 10} más. Consulta el bot para el listado completo._\n\n"
     msg += f"{'─' * 28}\n"
-    msg += f"*💵 Total emitido: ${total_monto:,.2f}*\n"
-    msg += f"_Responde al bot con tu empresa para consultar detalles_"
+    msg += f"*💵 Total emitido: *\n"
+    msg += f"_Responde al bot con tu empresa para consultar detalles_\n"
     return msg, len(nuevos)
 
 def actualizar_snapshot(data_nueva):
@@ -443,104 +444,108 @@ def procesar_notificaciones(mensaje_nuevo=None):
             logger.info("Fuera de ventana horaria (7AM - 9PM), notificaciones en pausa.")
 
 def etl_job():
-    """Función que orquesta el flujo ETL para múltiples empresas."""
-    logger.info("--- Iniciando ejecución del proceso ETL Multibase ---")
-    
-    if not SAP_COMPANIES:
-        logger.error("No hay empresas configuradas en la variable SAP_COMPANIES.")
-        return
-        
-    with sqlite3.connect(DB_NAME, timeout=15.0) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT primer_arranque_completado FROM etl_control WHERE id = 1")
-        row = cursor.fetchone()
-        primer_arranque = row[0] if row else 0
-    
-    logger.info(f"[NOTIF] Estado primer_arranque={primer_arranque}. {'Detección activa.' if primer_arranque else 'Detección DESACTIVADA — primer arranque pendiente.'}")
-        
-    empresas = [e.strip() for e in SAP_COMPANIES.split(',')]
-    empresas_exitosas = 0
-    
-    for empresa in empresas:
-        logger.info(f"Procesando empresa: {empresa}")
-        
-        from datetime import datetime
-        import time
-        start_time = time.time()
-        
-        session = sl_login(empresa)
-        if not session:
-            logger.error(f"Omitiendo empresa {empresa} por fallo de login.")
-            try:
-                with sqlite3.connect(DB_NAME, timeout=15.0) as conn_hist:
-                    conn_hist.execute("INSERT INTO etl_historial (timestamp, empresa, exito, error_msg) VALUES (?, ?, 0, ?)", 
-                                      (datetime.now().isoformat(), empresa, "Fallo de login"))
-            except Exception: pass
-            continue
-            
-        try:
-            cxc_data = fetch_cxc_data(session, empresa)
-            if not cxc_data:
-                logger.warning(f"Sin datos en SAP para {empresa}.")
-                continue
-                
-            # PASO 1: Detectar novedades (diferencial vs snapshot)
-            mensaje_novedades = None
-            registros_nuevos = 0
-            if primer_arranque == 1:
-                mensaje_novedades, registros_nuevos = detectar_novedades(cxc_data)
-            else:
-                logger.info(f"[NOTIF] {empresa}: Primer arranque pendiente — detección de novedades DESACTIVADA")
-                
-            registros_sap = len(cxc_data)
-            registros_actualizados = registros_sap - registros_nuevos
-                
-            # PASO 2: UPSERT a base de datos
-            exito = load_to_sqlite(cxc_data)
-            
-            # PASO 3: Guardar el nuevo snapshot
-            if exito:
-                empresas_exitosas += 1
-                actualizar_snapshot(cxc_data)
-                
-                # Insertar en etl_historial
-                duracion = time.time() - start_time
-                with sqlite3.connect(DB_NAME, timeout=15.0) as conn_hist:
-                    conn_hist.execute('''INSERT INTO etl_historial 
-                        (timestamp, empresa, registros_sap, registros_nuevos, registros_actualizados, duracion_segundos, exito) 
-                        VALUES (?, ?, ?, ?, ?, ?, 1)''', 
-                        (datetime.now().isoformat(), empresa, registros_sap, registros_nuevos, registros_actualizados, duracion))
-                
-            # PASO 4: Enviar notificaciones si las hay
-            if mensaje_novedades:
-                try:
-                    procesar_notificaciones(mensaje_novedades)
-                except Exception as e:
-                    logger.warning(f"Error aislado en el sistema de notificaciones para {empresa}: {e}")
-                    
-        except Exception as emp_err:
-            logger.error(f"Error general en ETL para {empresa}: {emp_err}")
-            try:
-                with sqlite3.connect(DB_NAME, timeout=15.0) as conn_hist:
-                    conn_hist.execute("INSERT INTO etl_historial (timestamp, empresa, exito, error_msg) VALUES (?, ?, 0, ?)", 
-                                      (datetime.now().isoformat(), empresa, str(emp_err)))
-            except Exception: pass
-        finally:
-            sl_logout(session)
-            
-    if primer_arranque == 0 and empresas_exitosas > 0:
-        with sqlite3.connect(DB_NAME, timeout=15.0) as conn:
-            conn.execute("UPDATE etl_control SET primer_arranque_completado = 1 WHERE id = 1")
-            conn.commit()
-        logger.info("Primer arranque completado. Snapshot base guardado para futuras comparaciones.")
-    
-    # PASO 5: Forzar purga de notificaciones pendientes de horarios nocturnos
     try:
-        procesar_notificaciones()
+        """Función que orquesta el flujo ETL para múltiples empresas."""
+        logger.info("--- Iniciando ejecución del proceso ETL Multibase ---")
+
+        if not SAP_COMPANIES:
+            logger.error("No hay empresas configuradas en la variable SAP_COMPANIES.")
+            return
+
+        with sqlite3.connect(DB_NAME, timeout=15.0) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT primer_arranque_completado FROM etl_control WHERE id = 1")
+            row = cursor.fetchone()
+            primer_arranque = row[0] if row else 0
+
+        logger.info(f"[NOTIF] Estado primer_arranque={primer_arranque}. {'Detección activa.' if primer_arranque else 'Detección DESACTIVADA — primer arranque pendiente.'}")
+
+        empresas = [e.strip() for e in SAP_COMPANIES.split(',')]
+        empresas_exitosas = 0
+
+        for empresa in empresas:
+            logger.info(f"Procesando empresa: {empresa}")
+
+            from datetime import datetime
+            import time
+            start_time = time.time()
+
+            session = sl_login(empresa)
+            if not session:
+                logger.error(f"Omitiendo empresa {empresa} por fallo de login.")
+                try:
+                    with sqlite3.connect(DB_NAME, timeout=15.0) as conn_hist:
+                        conn_hist.execute("INSERT INTO etl_historial (timestamp, empresa, exito, error_msg) VALUES (?, ?, 0, ?)", 
+                                          (datetime.now().isoformat(), empresa, "Fallo de login"))
+                except Exception: pass
+                continue
+
+            try:
+                cxc_data = fetch_cxc_data(session, empresa)
+                if not cxc_data:
+                    logger.warning(f"Sin datos en SAP para {empresa}.")
+                    continue
+
+                # PASO 1: Detectar novedades (diferencial vs snapshot)
+                mensaje_novedades = None
+                registros_nuevos = 0
+                if primer_arranque == 1:
+                    mensaje_novedades, registros_nuevos = detectar_novedades(cxc_data)
+                else:
+                    logger.info(f"[NOTIF] {empresa}: Primer arranque pendiente — detección de novedades DESACTIVADA")
+
+                registros_sap = len(cxc_data)
+                registros_actualizados = registros_sap - registros_nuevos
+
+                # PASO 2: UPSERT a base de datos
+                exito = load_to_sqlite(cxc_data)
+
+                # PASO 3: Guardar el nuevo snapshot
+                if exito:
+                    empresas_exitosas += 1
+                    actualizar_snapshot(cxc_data)
+
+                    # Insertar en etl_historial
+                    duracion = time.time() - start_time
+                    with sqlite3.connect(DB_NAME, timeout=15.0) as conn_hist:
+                        conn_hist.execute('''INSERT INTO etl_historial 
+                            (timestamp, empresa, registros_sap, registros_nuevos, registros_actualizados, duracion_segundos, exito) 
+                            VALUES (?, ?, ?, ?, ?, ?, 1)''', 
+                            (datetime.now().isoformat(), empresa, registros_sap, registros_nuevos, registros_actualizados, duracion))
+
+                # PASO 4: Enviar notificaciones si las hay
+                if mensaje_novedades:
+                    try:
+                        procesar_notificaciones(mensaje_novedades)
+                    except Exception as e:
+                        logger.warning(f"Error aislado en el sistema de notificaciones para {empresa}: {e}")
+
+            except Exception as emp_err:
+                logger.error(f"Error general en ETL para {empresa}: {emp_err}")
+                try:
+                    with sqlite3.connect(DB_NAME, timeout=15.0) as conn_hist:
+                        conn_hist.execute("INSERT INTO etl_historial (timestamp, empresa, exito, error_msg) VALUES (?, ?, 0, ?)", 
+                                          (datetime.now().isoformat(), empresa, str(emp_err)))
+                except Exception: pass
+            finally:
+                sl_logout(session)
+
+        if primer_arranque == 0 and empresas_exitosas > 0:
+            with sqlite3.connect(DB_NAME, timeout=15.0) as conn:
+                conn.execute("UPDATE etl_control SET primer_arranque_completado = 1 WHERE id = 1")
+                conn.commit()
+            logger.info("Primer arranque completado. Snapshot base guardado para futuras comparaciones.")
+
+        # PASO 5: Forzar purga de notificaciones pendientes de horarios nocturnos
+        try:
+            procesar_notificaciones()
+        except Exception as e:
+            logger.warning(f"Error purgando notificaciones atrasadas: {e}")
+
+        logger.info("--- Proceso ETL Multibase finalizado ---")
+
     except Exception as e:
-        logger.warning(f"Error purgando notificaciones atrasadas: {e}")
-        
-    logger.info("--- Proceso ETL Multibase finalizado ---")
+        logger.exception(f"Error crítico en el orquestador ETL: {e}")
 
 if __name__ == "__main__":
     # Suprimir warnings de InsecureRequestWarning si se usa HTTPS sin certificado verificado

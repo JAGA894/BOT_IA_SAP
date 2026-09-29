@@ -331,11 +331,11 @@ def detectar_novedades(data_nueva):
         estado = "✅ Pagada" if saldo <= 0 else "🔴 Pendiente"
         msg += f"📄 *Folio:* {fol}\n"
         msg += f"👤 *Cliente:* {cli}\n"
-        msg += f"💰 *Monto:*  | {estado}\n\n"
+        msg += f"💰 *Monto:* ${tot:,.2f} | {estado}\n\n"
     if len(nuevos) > 10:
         msg += f"_...y {len(nuevos) - 10} más. Consulta el bot para el listado completo._\n\n"
     msg += f"{'─' * 28}\n"
-    msg += f"*💵 Total emitido: *\n"
+    msg += f"*💵 Total emitido: ${total_monto:,.2f}*\n"
     msg += f"_Responde al bot con tu empresa para consultar detalles_\n"
     return msg, len(nuevos)
 

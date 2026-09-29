@@ -258,7 +258,7 @@ REGLA DE CERO ALUCINACIONES: NUNCA recicles folios, montos o nombres de clientes
 PARÁMETROS DE LA HERRAMIENTA:
 empresa_activa: OBLIGATORIO. El nombre de la empresa a consultar. Utiliza "TODAS" si piden consulta multi-empresa.
 metrica: "facturacion" | "cobro" | "cxc" | "conteo" | "top_maximo" | "listado_clientes" | "saldo_favor" | "deuda" | "pagado" | "listado_folios" | "detalle_factura"
-dimension: "global" | "cliente" | "proyecto" | "folio"
+dimension: "global" | "cliente" | "proyecto" | "folio" | "vendedor"
 valor_dimension: fragmento de texto (ej. "Agacel", "Aeroespacial") o el número de folio (ej. "1358"). "" si global.
 fecha_inicio: 'YYYY-MM-DD' o None
 fecha_fin: 'YYYY-MM-DD' o None
@@ -347,6 +347,10 @@ def _construir_where(empresa_activa: str, dimension: str, valor: str, fecha_inic
     elif dimension == "proyecto" and valor:
         valor_limpio = normalize_text(valor)
         condiciones.append("COALESCE(Proyecto, '') LIKE ?")
+        params.append(f"%{valor_limpio}%")
+    elif dimension == "vendedor" and valor:
+        valor_limpio = normalize_text(valor)
+        condiciones.append("COALESCE(Vendedor, '') LIKE ?")
         params.append(f"%{valor_limpio}%")
     elif dimension == "folio" and valor:
         condiciones.append("Folio_factura = ?")

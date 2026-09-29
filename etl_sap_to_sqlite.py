@@ -44,7 +44,11 @@ def init_db():
                     Retenciones REAL,
                     Total_factura REAL,
                     Importe_aplicado REAL,
-                    Saldo_vencido REAL
+                    Saldo_vencido REAL,
+                    Fecha_vencimiento DATE,
+                    Dias_atraso INTEGER,
+                    Moneda TEXT,
+                    Vendedor TEXT
                 )
             ''')
         
@@ -248,8 +252,9 @@ def load_to_sqlite(data):
         insert_query = '''
             INSERT INTO CxC_Local (
                 Empresa, Folio_factura, Nombre_cliente, Nombre_extranjero, Fecha_documento,
-                Proyecto, Impuestos, Retenciones, Total_factura, Importe_aplicado, Saldo_vencido, ultima_actualizacion
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                Proyecto, Impuestos, Retenciones, Total_factura, Importe_aplicado, Saldo_vencido, ultima_actualizacion,
+                Fecha_vencimiento, Dias_atraso, Moneda, Vendedor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(Empresa, Folio_factura) DO UPDATE SET
                 Nombre_cliente = excluded.Nombre_cliente,
                 Nombre_extranjero = excluded.Nombre_extranjero,
@@ -260,7 +265,11 @@ def load_to_sqlite(data):
                 Total_factura = excluded.Total_factura,
                 Importe_aplicado = excluded.Importe_aplicado,
                 Saldo_vencido = excluded.Saldo_vencido,
-                ultima_actualizacion = excluded.ultima_actualizacion
+                ultima_actualizacion = excluded.ultima_actualizacion,
+                Fecha_vencimiento = excluded.Fecha_vencimiento,
+                Dias_atraso = excluded.Dias_atraso,
+                Moneda = excluded.Moneda,
+                Vendedor = excluded.Vendedor
         '''
         
         records_to_insert = []
@@ -277,7 +286,11 @@ def load_to_sqlite(data):
                 row.get('Total_factura') if row.get('Total_factura') is not None else row.get('Total_de_la_factura', 0.0),
                 row.get('Importe_aplicado', 0.0),
                 row.get('Saldo_vencido', 0.0),
-                now_iso
+                now_iso,
+                row.get('Fecha_vencimiento'),
+                row.get('Dias_atraso'),
+                row.get('Moneda'),
+                row.get('Vendedor')
             ))
             
         with sqlite3.connect(DB_NAME, timeout=15.0) as conn:

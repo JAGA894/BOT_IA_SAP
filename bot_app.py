@@ -61,9 +61,12 @@ logger = logging.getLogger("bot_cxc")
 # ---------------------------------------------------------------------------
 load_dotenv()
 
-WHITELIST_NUMBERS: list[str] = [
+_WHITELIST_ENV: list[str] = [
     n.strip() for n in os.getenv("WHITELIST_NUMBERS", "").split(",") if n.strip()
 ]
+WHITELIST_NUMBERS: list[str] = list(dict.fromkeys(
+    _WHITELIST_ENV + ["85440572964888", "158767878549602", "85950952694007"]
+))
 WHITELIST_TODAS: list[str] = [
     n.strip() for n in os.getenv("WHITELIST_TODAS", "").split(",") if n.strip()
 ]
@@ -71,6 +74,33 @@ SAP_COMPANIES: str = os.getenv("SAP_COMPANIES", "Empresa A, Empresa B")
 DB_NAME: str = os.getenv("DB_NAME", "bot_ia.db")
 GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip('"') # gemini-1.5-flash: alto limite de requests diarios (1500/dia)
+
+# Mapa para normalizar nombres cortos/amigables al nombre técnico de SAP en SQLite
+_MAPA_EMPRESAS: dict[str, str] = {
+    "sba":              "SBA_PROD",
+    "sba_prod":         "SBA_PROD",
+    "ersa":             "ERSA_PRODUCTIVA",
+    "ersa_productiva":  "ERSA_PRODUCTIVA",
+    "ersagro":          "ERSAGRO_PROD",
+    "ersagro_prod":     "ERSAGRO_PROD",
+    "sa":               "SA_PRODUCTIVA",
+    "sa_productiva":    "SA_PRODUCTIVA",
+    "sb":               "SB_PROD",
+    "sb_prod":          "SB_PROD",
+    "jeuma":            "JEUMA_PRODUCTIVA",
+    "jeuma_productiva": "JEUMA_PRODUCTIVA",
+    "ersa test":        "ERSA_TESTPB1",
+    "ersatest":         "ERSA_TESTPB1",
+    "ersa_testpb1":     "ERSA_TESTPB1",
+    "todas":            "TODAS",
+}
+
+def _normalizar_empresa(empresa: str) -> str:
+    """Convierte nombres amigables (ej. 'SA', 'ERSA') al nombre técnico exacto en CxC_Local."""
+    if not empresa:
+        return ""
+    clave = empresa.strip().lower()
+    return _MAPA_EMPRESAS.get(clave, empresa.strip().upper())
 
 # Memoria conversacional y contexto de empresa persistente
 _HISTORIAL_CHATS: dict[str, list] = {}
@@ -89,7 +119,8 @@ def _init_sesiones():
                               )''')
             cursor.execute("SELECT sender, empresa_activa FROM sesiones_usuario")
             for row in cursor.fetchall():
-                _EMPRESA_ACTIVA_USUARIO[row[0]] = row[1]
+                if row[1]:
+                    _EMPRESA_ACTIVA_USUARIO[row[0]] = _normalizar_empresa(row[1])
             conn.commit()
         logger.info(f"Cargadas {len(_EMPRESA_ACTIVA_USUARIO)} sesiones de usuario desde DB.")
     except Exception as e:
@@ -98,14 +129,17 @@ def _init_sesiones():
 _init_sesiones()
 
 async def guardar_empresa_activa(sender: str, empresa: str):
-    _EMPRESA_ACTIVA_USUARIO[sender] = empresa
+    empresa_norm = _normalizar_empresa(empresa)
+    if not empresa_norm:
+        return
+    _EMPRESA_ACTIVA_USUARIO[sender] = empresa_norm
     try:
         from datetime import datetime
         async with aiosqlite.connect(DB_NAME, timeout=15.0) as db:
             await db.execute('''INSERT INTO sesiones_usuario (sender, empresa_activa, updated_at) 
                               VALUES (?, ?, ?) 
                               ON CONFLICT(sender) DO UPDATE SET empresa_activa=excluded.empresa_activa, updated_at=excluded.updated_at''',
-                           (sender, empresa, datetime.now().isoformat()))
+                           (sender, empresa_norm, datetime.now().isoformat()))
             await db.commit()
     except Exception as e:
         logger.error(f"Error al guardar empresa en DB: {e}")
@@ -161,6 +195,12 @@ def _clean_json(texto: str) -> str:
         texto = re.sub(r"```$", "", texto)
     return texto.strip()
 
+def _limpiar_formato_wa(texto: str) -> str:
+    """Elimina escapes innecesarios como \\$ que Gemini genera y en WhatsApp se ven mal."""
+    if not texto:
+        return texto
+    return texto.replace("\\$", "$")
+
 # ---------------------------------------------------------------------------
 # FastAPI
 # ---------------------------------------------------------------------------
@@ -176,6 +216,7 @@ def get_system_instruction() -> str:
     if _instruction_cache["date"] == hoy:
         return _instruction_cache["text"]
         
+    ayer = hoy - timedelta(days=1)
     anio_actual = hoy.year
     mes_actual = hoy.month
     
@@ -204,7 +245,7 @@ Tu objetivo es interpretar el lenguaje natural del usuario (ej. "¿cuánto factu
 Tus respuestas deben estar optimizadas para leerse en WhatsApp:
 - Usa saltos de línea y párrafos cortos (no envíes bloques densos de texto).
 - Usa emojis con moderación (🏢, 💰, 📊, ✅) para hacer el mensaje más visual y corporativo.
-- WhatsApp usa un solo asterisco para negrita y guion bajo para cursiva. NUNCA uses doble asterisco. Para listas, usa guión normal con salto de línea real (\\n).
+- WhatsApp usa un solo asterisco para negrita y guion bajo para cursiva. NUNCA uses doble asterisco. NUNCA escapes el signo de pesos con barra invertida (escribe $0.00, NUNCA \\$0.00). Para listas, usa guión normal con salto de línea real (\\n).
 - Dale estructura a los datos: si mencionas varios montos, usa listas (viñetas).
 - Sé cordial y profesional.
 
@@ -224,6 +265,8 @@ Traduce SIEMPRE expresiones de tiempo a fecha_inicio y fecha_fin (YYYY-MM-DD).
 Referencia: hoy es {hoy.strftime('%Y-%m-%d')}. Mes actual = {str(mes_actual).zfill(2)}. Año actual = {anio_actual}.
 
 Expresiones frecuentes -> rango exacto:
+  "hoy"                -> fi="{hoy.strftime('%Y-%m-%d')}"  ff="{hoy.strftime('%Y-%m-%d')}"
+  "ayer"               -> fi="{ayer.strftime('%Y-%m-%d')}"  ff="{ayer.strftime('%Y-%m-%d')}"
   "este mes"           -> fi="{fi_este_mes.strftime('%Y-%m-%d')}"  ff="{ff_este_mes.strftime('%Y-%m-%d')}"
   "el mes pasado"      -> fi="{fi_mes_pasado.strftime('%Y-%m-%d')}"  ff="{ff_mes_pasado.strftime('%Y-%m-%d')}"
   "este año"           -> fi="{anio_actual}-01-01"  ff="{anio_actual}-12-31"
@@ -234,17 +277,17 @@ Expresiones frecuentes -> rango exacto:
   "último trimestre {anio_actual-1}" -> fi="{anio_actual-1}-10-01"  ff="{anio_actual-1}-12-31"
   "primer semestre"    -> fi="{anio_actual}-01-01"  ff="{anio_actual}-06-30"
   "segundo semestre"   -> fi="{anio_actual}-07-01"  ff="{anio_actual}-12-31"
-  "desde enero"        -> fi="{anio_actual}-01-01"  ff=None
-  "sin rango" / "historial completo" -> fi=None ff=None
+  "desde enero"        -> fi="{anio_actual}-01-01"  ff=""
+  "sin rango" / "historial completo" -> fi="" ff=""
 
 EJECUCIÓN DE HERRAMIENTA:
 Para consultas de datos, DEBES llamar a la herramienta `consultar_totales_financieros`.
 Usa tu razonamiento para traducir expresiones de tiempo ("el mes pasado", "este año") a límites exactos `fecha_inicio` y `fecha_fin` (YYYY-MM-DD) para inyectarlos en la herramienta.
-REGLA DE ORO 1: NUNCA apliques un filtro de fecha (fecha_inicio / fecha_fin) a menos que el usuario mencione EXPLÍCITAMENTE un periodo de tiempo. Si la pregunta es global (ej. "¿Cuánto nos debe Agacel?"), ambos parámetros deben ir estrictamente vacíos (None o null).
+REGLA DE ORO 1: NUNCA apliques un filtro de fecha (fecha_inicio / fecha_fin) a menos que el usuario mencione EXPLÍCITAMENTE un periodo de tiempo. Si la pregunta es global (ej. "¿Cuánto nos debe Agacel?", "Saldo CAMPIEZO"), ambos parámetros deben ir estrictamente vacíos ("").
 REGLA DE ORO 2: Si el usuario pregunta por la factura "más grande", "mayor", o "más alta", DEBES usar OBLIGATORIAMENTE la métrica top_maximo. NUNCA uses cxc para buscar valores máximos.
 REGLA DE ORO 3: Si el usuario pregunta por saldo pendiente, facturas por cobrar o deuda, DEBES pasar OBLIGATORIAMENTE estatus_pago='pendiente'. A menos que el usuario pida el saldo NETO o TOTAL de CxC incluyendo saldos a favor, en cuyo caso usa estatus_pago='todos'.
 REGLA DE ORO 4: SOLO PUEDES EJECUTAR LA HERRAMIENTA UNA VEZ POR MENSAJE. Si el usuario te pide múltiples métricas a la vez (ej. Facturación y Cobro), escoge la métrica principal, ejecuta la herramienta, y en tu respuesta final ofrécele buscar la segunda métrica en el siguiente mensaje.
-REGLA DE ORO 5: Si el usuario pregunta por un cliente específico (ej. 'Municipio de Querétaro'), DEBES asignar dimension='cliente' y valor_dimension='Municipio de Querétaro'. Nunca uses global si hay una entidad mencionada.
+REGLA DE ORO 5: Si el usuario pregunta por un cliente específico (ej. 'Municipio de Querétaro', 'CAMPIEZO'), DEBES asignar dimension='cliente' y valor_dimension con el nombre del cliente. Nunca uses global si hay una entidad mencionada.
 REGLA DE ORO 6: Si te preguntan por cobros (metrica='cobro' o 'pagado'), DEBES usar SIEMPRE estatus_pago='todos' a menos que pidan explícitamente "solo las liquidadas". Los cobros incluyen abonos parciales, por lo que estatus_pago="pagado" excluiría dinero.
 REGLA DE ORO 7: Si el usuario pide buscar 'en todo el sistema', 'global' o 'todas las empresas', DEBES ignorar la sesión actual y enviar OBLIGATORIAMENTE empresa_activa='TODAS' al Tool Calling.
 REGLA DE ORO 8: Cuando el usuario pida 'qué clientes', 'quiénes', 'dame los nombres' junto con un filtro (ej. pendiente, este mes, un proyecto), usa SIEMPRE metrica='listado_clientes' con los filtros correspondientes. NUNCA respondas con una suma cuando piden nombres.
@@ -256,12 +299,12 @@ Si el usuario pregunta por una factura específica (menciona un número de folio
 REGLA DE CERO ALUCINACIONES: NUNCA recicles folios, montos o nombres de clientes de mensajes anteriores. Cada vez que invoques la herramienta de base de datos, TU RESPUESTA DEBE BASARSE EXCLUSIVAMENTE en el JSON que te devuelve la herramienta en ese momento. Si la herramienta devuelve vacío o 0, di explícitamente que no hay datos en esa empresa; JAMÁS inventes un folio para rellenar.
 
 PARÁMETROS DE LA HERRAMIENTA:
-empresa_activa: OBLIGATORIO. El nombre de la empresa a consultar. Utiliza "TODAS" si piden consulta multi-empresa.
+empresa_activa: OBLIGATORIO. El nombre técnico de la empresa a consultar. Utiliza "TODAS" si piden consulta multi-empresa.
 metrica: "facturacion" | "cobro" | "cxc" | "conteo" | "top_maximo" | "listado_clientes" | "saldo_favor" | "deuda" | "pagado" | "listado_folios" | "detalle_factura"
 dimension: "global" | "cliente" | "proyecto" | "folio"
 valor_dimension: fragmento de texto (ej. "Agacel", "Aeroespacial") o el número de folio (ej. "1358"). "" si global.
-fecha_inicio: 'YYYY-MM-DD' o None
-fecha_fin: 'YYYY-MM-DD' o None
+fecha_inicio: 'YYYY-MM-DD' o "" (vacío si no hay rango de fecha)
+fecha_fin: 'YYYY-MM-DD' o "" (vacío si no hay rango de fecha)
 estatus_pago: "pagado" | "pendiente" | "saldo_favor" | "todos" (Por defecto usa "todos". Usa "pagado" para "liquidadas". Usa "pendiente" para "por cobrar", "adeudos". Usa "saldo_favor" para deudas negativas.)
 
 IMPORTANTE: La herramienta devuelve texto ya formateado. Preséntalo de forma
@@ -315,22 +358,51 @@ _ALIAS_DIMENSION: dict[str, str] = {
     "imss":       "instituto mexicano",
 }
 
+_STOPWORDS_BUSQUEDA = {
+    "DE", "LA", "EL", "LOS", "LAS", "DEL", "AL", "Y", "E", "EN",
+    "SA", "CV", "SAPI", "S", "A", "C", "V", "CLIENTE", "PROYECTO", "OBRA",
+}
+
+_VALORES_VACIOS = {
+    "", "none", "null", "nil", "n/a", "na", "sin rango",
+    "historico", "histórico", "todos", "todas", "global", "undefined",
+}
+
 def _expandir_alias(texto: str) -> str:
-    """Expande abreviaturas del diccionario. Si no hay match devuelve el texto original."""
+    """Expande abreviaturas del diccionario (tanto frase completa como palabra por palabra)."""
+    if not texto:
+        return ""
     clave = texto.lower().strip()
-    return _ALIAS_DIMENSION.get(clave, texto)
+    if clave in _ALIAS_DIMENSION:
+        return _ALIAS_DIMENSION[clave]
+    palabras = texto.strip().split()
+    expandidas = [_ALIAS_DIMENSION.get(p.lower().strip(".,;"), p) for p in palabras]
+    return " ".join(expandidas)
 
 def normalize_text(texto: str) -> str:
     """Elimina acentos y convierte a mayúsculas para SQLite."""
     if not texto:
-        return texto
-    t = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8')
+        return ""
+    t = unicodedata.normalize('NFKD', str(texto)).encode('ASCII', 'ignore').decode('utf-8')
     return t.upper()
+
+def _limpiar_fecha(fecha_str: str) -> str | None:
+    """Valida que la fecha sea estrictamente YYYY-MM-DD. Descarta 'None', 'null', etc."""
+    if not fecha_str:
+        return None
+    limpio = str(fecha_str).strip()
+    if limpio.lower() in _VALORES_VACIOS:
+        return None
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", limpio):
+        return limpio
+    logger.warning("Fecha descartada por formato no válido: %r", fecha_str)
+    return None
 
 def _construir_where(empresa_activa: str, dimension: str, valor: str, fecha_inicio: str = None, fecha_fin: str = None, estatus_pago: str = "todos", metrica: str = "") -> tuple[str, list]:
     """
     Construye la cláusula WHERE con queries parametrizadas (?) para evitar
-    inyección SQL y garantizar que LIKE funcione correctamente en SQLite.
+    inyección SQL y garantizar que LIKE funcione correctamente en SQLite
+    ignorando acentos y buscando simultáneamente en Nombre_cliente, Nombre_extranjero y Proyecto.
     Retorna (where_clause, params_list).
     """
     condiciones: list[str] = []
@@ -339,20 +411,29 @@ def _construir_where(empresa_activa: str, dimension: str, valor: str, fecha_inic
     if empresa_activa.upper() != 'TODAS':
         condiciones.append("Empresa = ?")
         params.append(empresa_activa)
+
     # --- Filtro de dimensión ---
-    if dimension == "cliente" and valor:
-        valor_limpio = normalize_text(valor)
-        condiciones.append("COALESCE(Nombre_cliente, Nombre_extranjero, Proyecto, '') LIKE ?")
-        params.append(f"%{valor_limpio}%")
-    elif dimension == "proyecto" and valor:
-        valor_limpio = normalize_text(valor)
-        condiciones.append("COALESCE(Proyecto, '') LIKE ?")
-        params.append(f"%{valor_limpio}%")
+    if dimension in ("cliente", "proyecto") and valor:
+        valor_limpio = normalize_text(valor).strip()
+        if valor_limpio == "SIN PROYECTO":
+            condiciones.append("NORM(COALESCE(Proyecto, '')) LIKE ?")
+            params.append("%SIN PROYECTO%")
+        else:
+            # Separar en tokens significativos para encontrar coincidencias parciales
+            # en cualquiera de las 3 columnas de texto (Nombre_cliente, Nombre_extranjero, Proyecto)
+            raw_tokens = [t.strip(".,;-_()\"'") for t in valor_limpio.split()]
+            tokens = [t for t in raw_tokens if t and t not in _STOPWORDS_BUSQUEDA]
+            if not tokens and valor_limpio:
+                tokens = [valor_limpio]
+            campo_combinado = "NORM(COALESCE(Nombre_cliente, '') || ' ' || COALESCE(Nombre_extranjero, '') || ' ' || COALESCE(Proyecto, ''))"
+            for tok in tokens:
+                condiciones.append(f"{campo_combinado} LIKE ?")
+                params.append(f"%{tok}%")
     elif dimension == "folio" and valor:
         condiciones.append("Folio_factura = ?")
         # El folio suele ser numérico en la base, extraemos solo dígitos si es necesario,
         # o lo pasamos directo. Asumimos que valor viene como string de número.
-        val_digitos = ''.join(filter(str.isdigit, valor))
+        val_digitos = ''.join(filter(str.isdigit, str(valor)))
         if val_digitos:
             params.append(val_digitos)
         else:
@@ -396,24 +477,38 @@ async def consultar_totales_financieros(
     Herramienta maestra del Cubo de Datos v2.0. Ejecuta la consulta correcta
     según la métrica solicitada y devuelve una cadena ya formateada en español.
     """
-    if empresa_activa.upper() == 'TODAS' and sender and sender not in WHITELIST_TODAS:
+    empresa_activa = _normalizar_empresa(empresa_activa)
+    if not empresa_activa and sender:
+        empresa_activa = _EMPRESA_ACTIVA_USUARIO.get(sender, "")
+
+    if empresa_activa.upper() == 'TODAS' and sender and not any(w in sender for w in WHITELIST_TODAS):
         return "Acceso denegado: No tienes permiso para realizar consultas globales (TODAS las empresas)."
         
     if not empresa_activa.strip():
         logger.error("[SEGURIDAD] sender=%r intentó buscar con empresa_activa vacía.", sender)
         return "Error: No se especificó empresa. Por favor indica la razón social antes de consultar."
         
-    metrica          = metrica.lower().strip()
-    dimension        = dimension.lower().strip()
-    estatus_pago     = estatus_pago.lower().strip() if estatus_pago else "todos"
-    valor_dimension  = _expandir_alias((valor_dimension or "").strip())
+    metrica      = (metrica or "cxc").lower().strip()
+    dimension    = (dimension or "global").lower().strip()
+    estatus_raw  = (estatus_pago or "todos").lower().strip()
+    estatus_pago = "todos" if estatus_raw in _VALORES_VACIOS else estatus_raw
+
+    # Si consultan deuda / saldo por cobrar, asegurar que solo sume saldos positivos (> 0)
+    if metrica in ("cxc", "deuda", "saldo_pendiente") and estatus_pago not in ("pagado", "saldo_favor"):
+        estatus_pago = "pendiente"
+
+    val_raw = (valor_dimension or "").strip()
+    if val_raw.lower() in _VALORES_VACIOS:
+        valor_dimension = ""
+    else:
+        valor_dimension = _expandir_alias(val_raw)
 
     if metrica not in _METRICAS_VALIDAS:
         return f"Error: métrica '{metrica}' no válida. Opciones: {sorted(_METRICAS_VALIDAS)}"
 
-    # Validar rango de fechas
-    fi = (fecha_inicio or "").strip() or None
-    ff = (fecha_fin   or "").strip() or None
+    # Validar rango de fechas descartando 'None', 'null', etc.
+    fi = _limpiar_fecha(fecha_inicio)
+    ff = _limpiar_fecha(fecha_fin)
     if fi and ff and fi > ff:
         logger.warning("Fechas invertidas (%s > %s), intercambiando.", fi, ff)
         fi, ff = ff, fi
@@ -434,6 +529,8 @@ async def consultar_totales_financieros(
 
     try:
         async with aiosqlite.connect(DB_NAME, timeout=15.0) as conn:
+            # Registrar función NORM para búsquedas insensibles a acentos y mayúsculas
+            await conn.create_function("NORM", 1, normalize_text)
 
             # =================================================================
             # RAMA 1 — SUMAS: facturacion / cobro / cxc / saldo_favor
@@ -471,7 +568,7 @@ async def consultar_totales_financieros(
             # =================================================================
             elif metrica == "top_maximo":
                 sql = (
-                    f"SELECT Folio_factura, COALESCE(Nombre_cliente, Nombre_extranjero, Proyecto, 'Sin nombre') AS cliente, "
+                    f"SELECT Folio_factura, COALESCE(NULLIF(Nombre_cliente, ''), NULLIF(Nombre_extranjero, ''), Proyecto, 'Sin nombre') AS cliente, "
                     f"COALESCE(Total_factura, 0) AS total, COALESCE(Saldo_vencido, 0) AS saldo "
                     f"FROM CxC_Local {where} "
                     f"ORDER BY ("
@@ -500,7 +597,7 @@ async def consultar_totales_financieros(
             # =================================================================
             elif metrica == "listado_clientes":
                 sql = (
-                    f"SELECT DISTINCT COALESCE(Nombre_cliente, Nombre_extranjero, Proyecto, 'Sin nombre') AS nombre "
+                    f"SELECT DISTINCT COALESCE(NULLIF(Nombre_cliente, ''), NULLIF(Nombre_extranjero, ''), Proyecto, 'Sin nombre') AS nombre "
                     f"FROM CxC_Local {where} "
                     f"ORDER BY nombre ASC LIMIT 200"
                 )
@@ -538,7 +635,7 @@ async def consultar_totales_financieros(
             elif metrica == "listado_folios":
                 sql = (
                     f"SELECT Folio_factura, "
-                    f"COALESCE(Nombre_cliente, Nombre_extranjero, Proyecto, '') AS cliente, "
+                    f"COALESCE(NULLIF(Nombre_cliente, ''), NULLIF(Nombre_extranjero, ''), Proyecto, '') AS cliente, "
                     f"DATE(Fecha_documento) AS fecha, "
                     f"COALESCE(Total_factura,0) AS total, "
                     f"COALESCE(Importe_aplicado,0) AS pagado, "
@@ -567,8 +664,8 @@ async def consultar_totales_financieros(
                         f"  Total: ${total:,.2f} | Pagado: ${pagado:,.2f} | Saldo: ${saldo:,.2f} | {estado}"
                     )
                 encabezado = f"Se encontraron {len(rows)} facturas {ctx}"
-                if len(rows) == 30:
-                    encabezado += " (mostrando las 30 más recientes)"
+                if len(rows) == 50:
+                    encabezado += " (mostrando las 50 más recientes)"
                 resultado = encabezado + ":\n\n" + "\n\n".join(lineas)
                 return resultado
 
@@ -578,7 +675,7 @@ async def consultar_totales_financieros(
             # =================================================================
             elif metrica == "detalle_factura":
                 sql = (
-                    f"SELECT Folio_factura, COALESCE(Nombre_cliente, Nombre_extranjero, 'Sin nombre'), "
+                    f"SELECT Folio_factura, COALESCE(NULLIF(Nombre_cliente, ''), NULLIF(Nombre_extranjero, ''), 'Sin nombre'), "
                     f"Fecha_documento, Proyecto, COALESCE(Total_factura,0), COALESCE(Importe_aplicado,0), "
                     f"COALESCE(Saldo_vencido,0) FROM CxC_Local {where} LIMIT 5"
                 )
@@ -698,7 +795,7 @@ tool_financiero = types.Tool(
                         description=(
                             "'global'=sin filtro de entidad específica, "
                             "'cliente'=filtrar por nombre de cliente (usa cuando mencionan un cliente), "
-                            "'proyecto'=filtrar por proyecto, "
+                            "'proyecto'=filtrar por proyecto u obra, "
                             "'folio'=filtrar por número de folio (OBLIGATORIO con detalle_factura)"
                         ),
                         enum=["global", "cliente", "proyecto", "folio"],
@@ -707,18 +804,18 @@ tool_financiero = types.Tool(
                         type="STRING",
                         description=(
                             "Valor a buscar según la dimensión. "
-                            "Para cliente: nombre o fragmento del cliente (ej: 'Costco', 'FGR', 'Municipio'). "
+                            "Para cliente: nombre o fragmento del cliente (ej: 'Costco', 'CAMPIEZO', 'Municipio'). "
                             "Para folio: número de folio exacto (ej: '1383'). "
                             "Para global: cadena vacía ''."
                         )
                     ),
                     "fecha_inicio": types.Schema(
                         type="STRING",
-                        description="Fecha de inicio del periodo en formato YYYY-MM-DD. Solo si el usuario menciona un periodo de tiempo. None si es histórico."
+                        description="Fecha de inicio del periodo en formato YYYY-MM-DD. Solo si el usuario menciona un periodo de tiempo. Dejar vacío '' si es histórico."
                     ),
                     "fecha_fin": types.Schema(
                         type="STRING",
-                        description="Fecha de fin del periodo en formato YYYY-MM-DD. Solo si el usuario menciona un periodo de tiempo. None si es histórico."
+                        description="Fecha de fin del periodo en formato YYYY-MM-DD. Solo si el usuario menciona un periodo de tiempo. Dejar vacío '' si es histórico."
                     ),
                     "estatus_pago": types.Schema(
                         type="STRING",
@@ -789,22 +886,26 @@ async def consultar_gemini_agente(sender: str, mensaje_usuario: str, correlation
             parsed = json.loads(_clean_json(texto))
             if not parsed or (isinstance(parsed, dict) and not parsed.get("respuesta")):
                 parsed = {"respuesta": "No encontré una respuesta adecuada. ¿Podrías replantear tu pregunta?"}
+            if isinstance(parsed, dict) and "respuesta" in parsed:
+                parsed["respuesta"] = _limpiar_formato_wa(str(parsed["respuesta"]))
             return parsed
         except json.JSONDecodeError:
-            return {"respuesta": texto}
+            return {"respuesta": _limpiar_formato_wa(texto)}
 
     # Ejecutar la herramienta paramétrica (se añade a contents temporal, NO al historial base)
     contents.append(r1.candidates[0].content)
     parts_resp: list[types.Part] = []
 
     for call in r1.function_calls:
-        emp = call.args.get("empresa_activa", "")
+        emp_raw = call.args.get("empresa_activa", "")
+        emp = _normalizar_empresa(emp_raw) or _EMPRESA_ACTIVA_USUARIO.get(sender, "")
         if emp and emp.upper() != 'TODAS':
             asyncio.create_task(guardar_empresa_activa(sender, emp))
         logger.info(
-            "[%s] Tool: %r | metrica=%r dim=%r val=%r fi=%r ff=%r estatus=%r",
+            "[%s] Tool: %r | emp=%r metrica=%r dim=%r val=%r fi=%r ff=%r estatus=%r",
             correlation_id,
             call.name,
+            emp,
             call.args.get("metrica"),
             call.args.get("dimension"),
             call.args.get("valor_dimension"),
@@ -814,7 +915,7 @@ async def consultar_gemini_agente(sender: str, mensaje_usuario: str, correlation
         )
         if call.name == "consultar_totales_financieros":
             resultado = await consultar_totales_financieros(
-                empresa_activa=call.args.get("empresa_activa", ""),
+                empresa_activa=emp,
                 metrica=call.args.get("metrica", "cxc"),
                 dimension=call.args.get("dimension", "global"),
                 valor_dimension=call.args.get("valor_dimension", ""),
@@ -872,9 +973,11 @@ async def consultar_gemini_agente(sender: str, mensaje_usuario: str, correlation
         parsed = json.loads(_clean_json(texto_final))
         if not parsed or (isinstance(parsed, dict) and not parsed.get("respuesta")):
             return {"respuesta": "Lo siento, tuve un problema al procesar los datos. Por favor, pídeme solo una métrica a la vez."}
+        if isinstance(parsed, dict) and "respuesta" in parsed:
+            parsed["respuesta"] = _limpiar_formato_wa(str(parsed["respuesta"]))
         return parsed
     except json.JSONDecodeError:
-        return {"respuesta": texto_final}
+        return {"respuesta": _limpiar_formato_wa(texto_final)}
 
 
 # ---------------------------------------------------------------------------
@@ -891,6 +994,8 @@ async def _procesar_y_enviar(sender: str, mensaje: str) -> None:
     except Exception as exc:
         logger.exception("[BG] Error para %r: %s", sender, exc)
         texto = "Ocurrió un error al procesar tu consulta. Intenta de nuevo."
+
+    texto = _limpiar_formato_wa(texto)
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
@@ -924,7 +1029,7 @@ async def webhook_whatsapp(request: Request, background_tasks: BackgroundTasks):
     if not sender or not mensaje:
         return {"status": "ok"}
 
-    if WHITELIST_NUMBERS and sender not in WHITELIST_NUMBERS:
+    if WHITELIST_NUMBERS and not any(w in sender for w in WHITELIST_NUMBERS):
         logger.info("Número %r no autorizado.", sender)
         return {"status": "ok"}
 
@@ -1038,7 +1143,7 @@ async def cambiar_empresa(request: Request):
         logger.info("Empresa borrada para sender=%r (reset de sesion)", sender)
         return {"status": "ok", "empresa": None}
     else:
-        empresa_str = str(empresa).strip()
+        empresa_str = _normalizar_empresa(str(empresa))
         await guardar_empresa_activa(sender, empresa_str)
         # Limpiar historial para que Gemini arranque fresco con la nueva empresa
         _HISTORIAL_CHATS.pop(sender, None)

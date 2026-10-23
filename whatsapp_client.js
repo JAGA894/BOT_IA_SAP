@@ -216,12 +216,12 @@ async function routeMessage(senderNumber, messageText, msg) {
     let state = userStates.get(senderNumber) || { estado: 'NUEVO', empresa: null };
 
     // ============================================================
-    // (A) TRIGGER DE BIENVENIDA: saludos limpian la sesion
+    // (A) TRIGGER DE BIENVENIDA / CAMBIO DE EMPRESA: limpia la sesion
     // ============================================================
-    const esSaludo = /^(hola|buenos dias|buenas tardes|buenas noches|inicio|start|reiniciar|menu|opciones|ayuda|help|0)$/i.test(textLower);
+    const esSaludo = /^(hola|buenos dias|buenas tardes|buenas noches|inicio|start|reiniciar|menu|opciones|cambiar|cambiar empresa|otra empresa|ayuda|help|0)$/i.test(textLower);
 
     if (esSaludo) {
-        console.log('   [ROUTER] Saludo detectado — limpiando sesion de ' + senderNumber);
+        console.log('   [ROUTER] Saludo/Cambio detectado — limpiando sesion de ' + senderNumber);
 
         // Limpiar estado local (empresa persiste en Python hasta que elijan nueva)
         state = { estado: 'ELEGIR_EMPRESA', empresa: null };
@@ -318,7 +318,7 @@ async function routeMessage(senderNumber, messageText, msg) {
         if (textLower === '3' || textLower.includes('agente') || textLower.includes('ia') || textLower.includes('consulta')) {
             state.estado = 'IA';
             userStates.set(senderNumber, state);
-            await msg.reply('*Agente IA* [' + nombreDisplay + ']\n\nEscribe cualquier pregunta financiera.\n_Para volver al menu escribe "menu"_');
+            await msg.reply('*Agente IA* [' + nombreDisplay + ']\n\nEscribe cualquier pregunta financiera.\n_Para elegir otra empresa escribe "cambiar"_');
             return;
         }
 
@@ -383,7 +383,7 @@ callbackApp.post('/send-reply', async (req, res) => {
     const { to, message } = req.body;
     if (!to || !message) return res.status(400).json({ error: 'Faltan to y message.' });
 
-    const cleanMessage = message.replace(/\\n/g, '\n').replace(/\*\*/g, '*');
+    const cleanMessage = message.replace(/\\n/g, '\n').replace(/\*\*/g, '*').replace(/\\\$/g, '$');
     console.log('\n[SEND-REPLY] Para: ' + to);
     console.log('   "' + cleanMessage.substring(0, 100) + '..."');
 
@@ -417,7 +417,7 @@ callbackApp.post('/broadcast', async (req, res) => {
         return res.status(400).json({ error: 'Faltan targets y message.' });
     }
 
-    const cleanMessage = message.replace(/\\n/g, '\n').replace(/\*\*/g, '*');
+    const cleanMessage = message.replace(/\\n/g, '\n').replace(/\*\*/g, '*').replace(/\\\$/g, '$');
     const msgHash = crypto.createHash('md5').update(cleanMessage).digest('hex');
     const results = [];
 

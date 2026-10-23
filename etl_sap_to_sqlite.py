@@ -5,6 +5,7 @@ import sqlite3
 import logging
 import requests
 import schedule
+from collections import defaultdict
 from dotenv import load_dotenv
 
 # Configurar logging
@@ -23,9 +24,21 @@ SAP_COMPANIES = os.getenv("SAP_COMPANIES", "")
 SL_USERNAME = os.getenv("SL_USERNAME")
 SL_PASSWORD = os.getenv("SL_PASSWORD")
 DB_NAME = os.getenv("DB_NAME", "bot_ia.db")
+# Hora de corte al final del día laboral para enviar el resumen acumulado (por defecto 18 = 6:00 PM)
+HORA_RESUMEN_DIARIO = int(os.getenv("HORA_RESUMEN_DIARIO", "18"))
+
+NOMBRES_DISPLAY = {
+    "SBA_PROD":          "SBA",
+    "ERSA_PRODUCTIVA":   "ERSA",
+    "ERSAGRO_PROD":      "ERSAGRO",
+    "SA_PRODUCTIVA":     "SA",
+    "SB_PROD":           "SB",
+    "JEUMA_PRODUCTIVA":  "JEUMA",
+    "ERSA_TESTPB1":      "ERSA Test",
+}
 
 def init_db():
-    """Inicializa la base de datos y crea la tabla si no existe."""
+    """Inicializa la base de datos y crea las tablas si no existen."""
     try:
         with sqlite3.connect(DB_NAME, timeout=15.0) as conn:
             cursor = conn.cursor()
@@ -53,12 +66,19 @@ def init_db():
                 CREATE TABLE IF NOT EXISTS etl_control (
                     id INTEGER PRIMARY KEY,
                     primer_arranque_completado INTEGER DEFAULT 0,
-                    ultimo_etl_exitoso TEXT
+                    ultimo_etl_exitoso TEXT,
+                    ultimo_resumen_fecha TEXT
                 )
             ''')
         
             # Inicializar fila de control si no existe
             cursor.execute("INSERT OR IGNORE INTO etl_control (id, primer_arranque_completado) VALUES (1, 0)")
+
+            # Asegurar columna ultimo_resumen_fecha en etl_control si la tabla ya existía
+            cursor.execute("PRAGMA table_info(etl_control)")
+            etl_cols = [c[1] for c in cursor.fetchall()]
+            if "ultimo_resumen_fecha" not in etl_cols:
+                cursor.execute("ALTER TABLE etl_control ADD COLUMN ultimo_resumen_fecha TEXT")
         
             # Tabla para guardar la foto anterior de los folios
             cursor.execute('''
@@ -88,6 +108,21 @@ def init_db():
                     timestamp_intento TEXT,
                     enviar_desde TEXT,
                     enviado INTEGER DEFAULT 0
+                )
+            ''')
+
+            # NUEVA TABLA: Acumulador diario de nuevas facturas (se limpia cada día tras enviar el resumen)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS cxc_movimientos_dia (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    empresa TEXT NOT NULL,
+                    folio INTEGER NOT NULL,
+                    proyecto TEXT,
+                    cliente TEXT,
+                    monto REAL DEFAULT 0.0,
+                    saldo REAL DEFAULT 0.0,
+                    fecha_deteccion TEXT,
+                    UNIQUE(empresa, folio)
                 )
             ''')
         
@@ -144,7 +179,7 @@ def init_db():
                     error_msg TEXT
                 )
             ''')
-            logger.info("Base de datos y tabla inicializadas correctamente.")
+            logger.info("Base de datos y tablas inicializadas correctamente.")
 
         conn.commit()
     except Exception as e:
@@ -190,6 +225,54 @@ def sl_logout(session):
     except Exception as e:
         logger.warning(f"Error durante el logout de Service Layer: {e}")
 
+def consolidar_por_folio(rows):
+    """
+    Si una misma factura (Empresa, Folio_factura) viene dividida en varias líneas de proyecto
+    desde la vista de SAP HANA, suma sus importes y concatena los proyectos para no perder saldo
+    en el UPSERT por (Empresa, Folio_factura).
+    """
+    agrupado = {}
+    for row in rows:
+        emp = row.get('Empresa')
+        fol = row.get('Folio_factura') or row.get('Folio_de_la_factura')
+        if not emp or fol is None:
+            continue
+        key = (emp, fol)
+        proy = (row.get('Proyecto') or 'Sin Proyecto').strip()
+        imp = float(row.get('Impuestos') or 0.0)
+        ret = float(row.get('Retenciones') or 0.0)
+        tot = float(row.get('Total_factura') if row.get('Total_factura') is not None else (row.get('Total_de_la_factura') or 0.0))
+        apl = float(row.get('Importe_aplicado') or 0.0)
+        sal = float(row.get('Saldo_vencido') or 0.0)
+
+        if key not in agrupado:
+            copia = dict(row)
+            copia['Folio_factura'] = fol
+            copia['Proyecto'] = proy
+            copia['Impuestos'] = imp
+            copia['Retenciones'] = ret
+            copia['Total_factura'] = tot
+            copia['Importe_aplicado'] = apl
+            copia['Saldo_vencido'] = sal
+            copia['_proyectos_set'] = [proy]
+            agrupado[key] = copia
+        else:
+            item = agrupado[key]
+            item['Impuestos'] = round(item['Impuestos'] + imp, 2)
+            item['Retenciones'] = round(item['Retenciones'] + ret, 2)
+            item['Total_factura'] = round(item['Total_factura'] + tot, 2)
+            item['Importe_aplicado'] = round(item['Importe_aplicado'] + apl, 2)
+            item['Saldo_vencido'] = round(item['Saldo_vencido'] + sal, 2)
+            if proy and proy not in item['_proyectos_set']:
+                item['_proyectos_set'].append(proy)
+                item['Proyecto'] = " / ".join(item['_proyectos_set'])
+
+    resultado = []
+    for item in agrupado.values():
+        item.pop('_proyectos_set', None)
+        resultado.append(item)
+    return resultado
+
 def fetch_cxc_data(session, company_name):
     """Obtiene los datos de la vista V_CXC_BOT_IA y les añade el nombre de la empresa."""
     url = f"{SL_URL}/b1s/v1/sml.svc/V_CXC_BOT_IA"
@@ -229,8 +312,9 @@ def fetch_cxc_data(session, company_name):
             else:
                 url = None
                 
-        logger.info(f"Se obtuvieron {len(all_data)} registros de SAP HANA para {company_name}.")
-        return all_data
+        consolidados = consolidar_por_folio(all_data)
+        logger.info(f"Se obtuvieron {len(all_data)} líneas ({len(consolidados)} facturas únicas) de SAP HANA para {company_name}.")
+        return consolidados
     except requests.exceptions.RequestException as e:
         logger.error(f"Error al obtener datos de Service Layer para {company_name}: {e}")
         return None
@@ -291,8 +375,12 @@ def load_to_sqlite(data):
         logger.error(f"Error al cargar datos en SQLite: {e}")
         return False
 
-def detectar_novedades(data_nueva):
-    from datetime import datetime, timedelta
+def acumular_novedades(data_nueva):
+    """
+    Detecta facturas nuevas respecto a CxC_Snapshot_folios y las guarda en la tabla
+    acumuladora cxc_movimientos_dia para enviarlas en un único resumen diario.
+    """
+    from datetime import datetime
     with sqlite3.connect(DB_NAME, timeout=15.0) as conn_snap:
         cursor = conn_snap.cursor()
         cursor.execute("SELECT empresa, folio FROM CxC_Snapshot_folios")
@@ -311,33 +399,82 @@ def detectar_novedades(data_nueva):
                 vistos.add(key)
             
     if not nuevos:
-        return None, 0
+        return 0
         
-    total_monto = sum(float(r.get('Total_factura') or r.get('Total_de_la_factura') or 0.0) for r in nuevos)
-    empresa_nombres = ", ".join(list(set(r.get('Empresa') for r in nuevos)))
-    inicio_hora = (datetime.now() - timedelta(minutes=15)).strftime("%H:%M")
-    fin_hora = datetime.now().strftime("%H:%M")
-    
-    fecha_hoy = datetime.now().strftime("%d/%b/%Y")
-    msg = f"🔔 *Nueva(s) Factura(s) Detectada(s)*\n"
-    msg += f"📅 {fecha_hoy}\n"
-    msg += f"🏢 Empresa(s): {empresa_nombres}\n"
+    ahora_iso = datetime.now().isoformat()
+    registros_dia = []
+    for r in nuevos:
+        emp = str(r.get('Empresa'))
+        fol = int(r.get('Folio_factura') or r.get('Folio_de_la_factura'))
+        proy = (r.get('Proyecto') or 'Sin Proyecto').strip()
+        cli = (r.get('Nombre_cliente') or r.get('Nombre_del_cliente') or 'Sin nombre').strip()
+        tot = float(r.get('Total_factura') if r.get('Total_factura') is not None else (r.get('Total_de_la_factura') or 0.0))
+        sal = float(r.get('Saldo_vencido') or 0.0)
+        registros_dia.append((emp, fol, proy, cli, tot, sal, ahora_iso))
+
+    with sqlite3.connect(DB_NAME, timeout=15.0) as conn:
+        cursor = conn.cursor()
+        cursor.executemany('''
+            INSERT OR IGNORE INTO cxc_movimientos_dia
+            (empresa, folio, proyecto, cliente, monto, saldo, fecha_deteccion)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', registros_dia)
+        conn.commit()
+
+    emp_str = ", ".join(sorted(set(r[0] for r in registros_dia)))
+    logger.info(f"[NOTIF] Se acumularon {len(registros_dia)} nueva(s) factura(s) de [{emp_str}] en cxc_movimientos_dia.")
+    return len(registros_dia)
+
+def construir_mensaje_resumen(rows):
+    """
+    Construye un resumen diario compacto agrupado por Empresa y Obra (Proyecto),
+    mostrando únicamente la obra y el monto (sin nombre de cliente ni detalles extensos).
+    """
+    from datetime import datetime
+    if not rows:
+        return None
+
+    # rows: [(id, empresa, folio, proyecto, monto), ...]
+    por_empresa = defaultdict(lambda: defaultdict(lambda: {"monto": 0.0, "cantidad": 0}))
+    conteo_empresa = defaultdict(int)
+    total_empresa = defaultdict(float)
+    total_general = 0.0
+    total_facturas = 0
+
+    for _id, emp, _fol, proy, monto in rows:
+        obra = (proy or "Sin Proyecto").strip()
+        m = float(monto or 0.0)
+        por_empresa[emp][obra]["monto"] += m
+        por_empresa[emp][obra]["cantidad"] += 1
+        conteo_empresa[emp] += 1
+        total_empresa[emp] += m
+        total_general += m
+        total_facturas += 1
+
+    fecha_str = datetime.now().strftime("%d/%b/%Y")
+    msg = f"📊 *Resumen Diario de Nuevas Facturas*\n"
+    msg += f"📅 {fecha_str}\n"
     msg += f"{'─' * 28}\n"
-    for r in nuevos[:10]:
-        fol = r.get('Folio_factura') or r.get('Folio_de_la_factura')
-        cli = (r.get('Nombre_cliente') or r.get('Nombre_del_cliente') or r.get('Proyecto') or 'Sin nombre')
-        tot = float(r.get('Total_factura') or r.get('Total_de_la_factura') or 0.0)
-        saldo = float(r.get('Saldo_vencido') or 0.0)
-        estado = "✅ Pagada" if saldo <= 0 else "🔴 Pendiente"
-        msg += f"📄 *Folio:* {fol}\n"
-        msg += f"👤 *Cliente:* {cli}\n"
-        msg += f"💰 *Monto:* ${tot:,.2f} | {estado}\n\n"
-    if len(nuevos) > 10:
-        msg += f"_...y {len(nuevos) - 10} más. Consulta el bot para el listado completo._\n\n"
+
+    for emp in sorted(por_empresa.keys()):
+        emp_display = NOMBRES_DISPLAY.get(emp, emp)
+        n_emp = conteo_empresa[emp]
+        tot_emp = total_empresa[emp]
+        etiqueta_fact = "factura" if n_emp == 1 else "facturas"
+        msg += f"🏢 *{emp_display}* ({n_emp} {etiqueta_fact} | ${tot_emp:,.2f})\n"
+        obras_dict = por_empresa[emp]
+        for obra, info in obras_dict.items():
+            cant = info["cantidad"]
+            monto_obra = info["monto"]
+            sufijo_cant = f" ({cant})" if cant > 1 else ""
+            msg += f"• 🏗️ *Obra:* {obra}{sufijo_cant}\n"
+            msg += f"  💰 *Monto:* ${monto_obra:,.2f}\n"
+        msg += "\n"
+
     msg += f"{'─' * 28}\n"
-    msg += f"*💵 Total emitido: ${total_monto:,.2f}*\n"
-    msg += f"_Responde al bot con tu empresa para consultar detalles_\n"
-    return msg, len(nuevos)
+    msg += f"*💵 Total del día ({total_facturas}): ${total_general:,.2f}*\n"
+    msg += f"_Si necesitas consultar clientes, folios o más detalles, pregúntale al bot._\n"
+    return msg
 
 def actualizar_snapshot(data_nueva):
     if not data_nueva: return
@@ -415,33 +552,66 @@ def enviar_broadcast(mensaje, conn):
         # Si no viene JSON válido, simplemente loggear la respuesta cruda
         logger.warning(f"[NOTIF] Respuesta inesperada de Node.js: {resp.text[:200]}")
 
-def procesar_notificaciones(mensaje_nuevo=None):
+def procesar_resumen_diario():
+    """
+    Verifica si hay movimientos acumulados en cxc_movimientos_dia y si corresponde enviar
+    el resumen diario:
+    1) Al final del día laboral (hora >= HORA_RESUMEN_DIARIO y < 21) si aún no se envió hoy, O
+    2) Al inicio del día siguiente (hora >= 8 y < 21) si quedaron movimientos rezagados de días anteriores.
+    Tras enviar exitosamente el resumen por WhatsApp, limpia la tabla cxc_movimientos_dia.
+    """
     from datetime import datetime
+    ahora = datetime.now()
+    hoy_str = ahora.strftime("%Y-%m-%d")
+    hora_actual = ahora.hour
+
+    if not (8 <= hora_actual < 21):
+        logger.info("[NOTIF] Fuera de horario de envío (8 AM - 9 PM). Los movimientos siguen acumulándose.")
+        return
+
     with sqlite3.connect(DB_NAME, timeout=15.0) as conn:
         cursor = conn.cursor()
-        
-        if mensaje_nuevo:
-            hora_actual = datetime.now().hour
-            enviar_desde = None if 7 <= hora_actual < 21 else "fuera_horario"
-            cursor.execute("INSERT INTO notificaciones_pendientes (mensaje, enviar_desde) VALUES (?, ?)", (mensaje_nuevo, enviar_desde))
+        cursor.execute("SELECT id, empresa, folio, proyecto, monto, fecha_deteccion FROM cxc_movimientos_dia ORDER BY id ASC")
+        movimientos = cursor.fetchall()
+
+        if not movimientos:
+            return
+
+        cursor.execute("SELECT ultimo_resumen_fecha FROM etl_control WHERE id = 1")
+        row_ctrl = cursor.fetchone()
+        ultimo_resumen = row_ctrl[0] if row_ctrl and row_ctrl[0] else ""
+
+        # Verificar si existen movimientos detectados en días anteriores a hoy
+        hay_rezagados_dia_anterior = any(
+            (m[5] or "")[:10] < hoy_str for m in movimientos if m[5]
+        )
+        es_hora_corte_diario = (hora_actual >= HORA_RESUMEN_DIARIO and ultimo_resumen != hoy_str)
+
+        if not (hay_rezagados_dia_anterior or es_hora_corte_diario):
+            logger.info(
+                f"[NOTIF] {len(movimientos)} factura(s) acumulada(s) para el resumen de hoy "
+                f"(se enviará a partir de las {HORA_RESUMEN_DIARIO:02d}:00 hrs)."
+            )
+            return
+
+        rows_para_mensaje = [(m[0], m[1], m[2], m[3], m[4]) for m in movimientos]
+        max_id = max(m[0] for m in movimientos)
+        mensaje = construir_mensaje_resumen(rows_para_mensaje)
+
+        if not mensaje:
+            return
+
+        try:
+            logger.info(f"[NOTIF] Enviando resumen diario con {len(movimientos)} movimiento(s)...")
+            enviar_broadcast(mensaje, conn)
+            # Limpiar la tabla de movimientos acumulados para el día siguiente
+            cursor.execute("DELETE FROM cxc_movimientos_dia WHERE id <= ?", (max_id,))
+            if es_hora_corte_diario:
+                cursor.execute("UPDATE etl_control SET ultimo_resumen_fecha = ? WHERE id = 1", (hoy_str,))
             conn.commit()
-            
-        hora_actual = datetime.now().hour
-        if 7 <= hora_actual < 21:
-            cursor.execute("SELECT id, mensaje FROM notificaciones_pendientes WHERE enviado = 0")
-            pendientes = cursor.fetchall()
-            for pid, msg in pendientes:
-                try:
-                    enviar_broadcast(msg, conn)
-                    try:
-                        cursor.execute("UPDATE notificaciones_pendientes SET enviado = 1 WHERE id = ?", (pid,))
-                        conn.commit()
-                    except Exception as upd_err:
-                        logger.error(f"Error crítico: Broadcast enviado pero no se pudo marcar como enviado (pid={pid}): {upd_err}")
-                except Exception as e:
-                    logger.warning(f"Fallo al enviar notificación {pid}, se reintentará luego: {e}")
-        else:
-            logger.info("Fuera de ventana horaria (7AM - 9PM), notificaciones en pausa.")
+            logger.info(f"[NOTIF] ✅ Resumen diario enviado y tabla cxc_movimientos_dia limpiada ({len(movimientos)} registros depurados).")
+        except Exception as e:
+            logger.warning(f"[NOTIF] ⚠️ No se pudo enviar el resumen diario todavía (se conservarán los datos para reintentar): {e}")
 
 def etl_job():
     try:
@@ -458,7 +628,7 @@ def etl_job():
             row = cursor.fetchone()
             primer_arranque = row[0] if row else 0
 
-        logger.info(f"[NOTIF] Estado primer_arranque={primer_arranque}. {'Detección activa.' if primer_arranque else 'Detección DESACTIVADA — primer arranque pendiente.'}")
+        logger.info(f"[NOTIF] Estado primer_arranque={primer_arranque}. {'Detección activa (acumulación diaria).' if primer_arranque else 'Detección DESACTIVADA — primer arranque pendiente.'}")
 
         empresas = [e.strip() for e in SAP_COMPANIES.split(',')]
         empresas_exitosas = 0
@@ -486,11 +656,13 @@ def etl_job():
                     logger.warning(f"Sin datos en SAP para {empresa}.")
                     continue
 
-                # PASO 1: Detectar novedades (diferencial vs snapshot)
-                mensaje_novedades = None
+                # PASO 1: Detectar novedades y acumularlas en cxc_movimientos_dia
                 registros_nuevos = 0
                 if primer_arranque == 1:
-                    mensaje_novedades, registros_nuevos = detectar_novedades(cxc_data)
+                    try:
+                        registros_nuevos = acumular_novedades(cxc_data)
+                    except Exception as e:
+                        logger.warning(f"Error al acumular novedades para {empresa}: {e}")
                 else:
                     logger.info(f"[NOTIF] {empresa}: Primer arranque pendiente — detección de novedades DESACTIVADA")
 
@@ -513,13 +685,6 @@ def etl_job():
                             VALUES (?, ?, ?, ?, ?, ?, 1)''', 
                             (datetime.now().isoformat(), empresa, registros_sap, registros_nuevos, registros_actualizados, duracion))
 
-                # PASO 4: Enviar notificaciones si las hay
-                if mensaje_novedades:
-                    try:
-                        procesar_notificaciones(mensaje_novedades)
-                    except Exception as e:
-                        logger.warning(f"Error aislado en el sistema de notificaciones para {empresa}: {e}")
-
             except Exception as emp_err:
                 logger.error(f"Error general en ETL para {empresa}: {emp_err}")
                 try:
@@ -536,11 +701,11 @@ def etl_job():
                 conn.commit()
             logger.info("Primer arranque completado. Snapshot base guardado para futuras comparaciones.")
 
-        # PASO 5: Forzar purga de notificaciones pendientes de horarios nocturnos
+        # PASO 4: Evaluar si corresponde enviar el Resumen Diario y limpiar cxc_movimientos_dia
         try:
-            procesar_notificaciones()
+            procesar_resumen_diario()
         except Exception as e:
-            logger.warning(f"Error purgando notificaciones atrasadas: {e}")
+            logger.warning(f"Error procesando resumen diario: {e}")
 
         logger.info("--- Proceso ETL Multibase finalizado ---")
 
@@ -559,9 +724,12 @@ if __name__ == "__main__":
     # Ejecutar la primera vez inmediatamente al arrancar
     etl_job()
     
-    # Programar la ejecución cada 30 minutos
+    # Programar la ejecución del ETL cada 30 minutos
     schedule.every(30).minutes.do(etl_job)
-    logger.info("Proceso programado para ejecutarse cada 30 minutos ininterrumpidamente.")
+    # Programar chequeos puntuales del resumen diario al inicio y final del día
+    schedule.every().day.at("08:00").do(procesar_resumen_diario)
+    schedule.every().day.at(f"{HORA_RESUMEN_DIARIO:02d}:00").do(procesar_resumen_diario)
+    logger.info(f"Proceso ETL programado cada 30 min. Resumen diario programado a las {HORA_RESUMEN_DIARIO:02d}:00 hrs (y 08:00 hrs para rezagados).")
     
     # Bucle infinito
     while True:
